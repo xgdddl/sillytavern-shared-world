@@ -1,0 +1,8 @@
+node_modules/
+artifacts/
+*.log
+.env
+.env.*
+docs/需求确认与重要问题.md
+docs/检查记录-20261027.md
+docs/酒馆导入记录-20261027.md

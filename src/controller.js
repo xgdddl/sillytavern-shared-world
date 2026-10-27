@@ -1,0 +1,251 @@
+import { MAX_ACTORS, WorldError, assert, cardFingerprint, copy, hash, makeActor, profile, project, storyTime, uid, validateEvent } from './domain.js';
+import { GitHubStore, LocalStore } from './storage.js';
+import { WorldService } from './service.js';
+import { ModelRouter, parseModelJson } from './ai.js';
+import { extractionPrompt, narrativePrompt, summaryPrompt } from './prompts.js';
+
+const DEFAULTS = {
+    provider: 'local', github: { owner: '', repo: '', branch: 'main', directory: 'shared-world/worlds' },
+    models: { extraction: { endpoint: '', model: '' }, summary: { endpoint: '', model: '' }, reasoning: { endpoint: '', model: '' } },
+    bindings: {}, pending: [], archivedDrafts: [], snapshots: {},
+};
+export class WorldController extends EventTarget {
+    constructor({ getContext = () => null, storage = globalThis.localStorage, namespace = 'shared-world.preferences.v1', storeFactory, demoCard } = {}) {
+        super();
+        this.getContext = getContext; this.storage = storage; this.namespace = namespace;
+        this.storeFactory = storeFactory; this.demoCard = demoCard; this.secrets = new Map();
+        const ctx = getContext();
+        let saved = ctx?.extensionSettings?.shared_world;
+        if (!saved) {
+            const raw = storage.getItem(namespace);
+            if (raw) {
+                try { saved = JSON.parse(raw); } catch { throw new WorldError('SETTINGS_CORRUPT', '设置文件损坏，原文没有被覆盖'); }
+            }
+        }
+        assert(!saved || (saved && typeof saved === 'object' && !Array.isArray(saved)), 'SETTINGS_CORRUPT', '设置结构无效');
+        this.settings = { ...copy(DEFAULTS), ...saved };
+        assert(['local', 'github'].includes(this.settings.provider), 'SETTINGS_CORRUPT', '存储来源配置无效，没有静默改成本机存储');
+        for (const field of ['pending', 'archivedDrafts']) assert(Array.isArray(this.settings[field]), 'SETTINGS_CORRUPT', field + '不是有效列表，原数据保留');
+        for (const field of ['bindings', 'snapshots', 'models', 'github']) assert(this.settings[field] && typeof this.settings[field] === 'object' && !Array.isArray(this.settings[field]), 'SETTINGS_CORRUPT', field + '不是有效对象，原数据保留');
+        this.settings.playerId ||= uid();
+        this.settings.bindings ||= {}; this.settings.pending ||= []; this.settings.archivedDrafts ||= []; this.settings.snapshots ||= {};
+        this.state = { worlds: [], world: null, cardKey: '', cardName: '', bindingKey: '', notice: '', error: '', busy: false, lastSync: null, summary: '' };
+        this.save(); this.configureStore();
+        this.models = new ModelRouter({ getContext, getSettings: () => this.settings, getSecret: (key) => this.secrets.get(key) });
+    }
+    changed() { this.dispatchEvent(new Event('change')); }
+    save() {
+        const ctx = this.getContext();
+        if (ctx?.extensionSettings) {
+            ctx.extensionSettings.shared_world = copy(this.settings);
+            ctx.saveSettingsDebounced?.();
+        } else this.storage.setItem(this.namespace, JSON.stringify(this.settings));
+    }
+    configureStore() {
+        const store = this.storeFactory?.(this.settings) ?? (this.settings.provider === 'github'
+            ? new GitHubStore({ ...this.settings.github, token: () => this.secrets.get('github') ?? '' })
+            : new LocalStore(this.storage));
+        this.service = new WorldService(store, this.settings.playerId);
+    }
+    get binding() {
+        return this.settings.bindings[this.state.bindingKey] ?? { worldId: '', actorId: '', day: 0, clock: '08:00', participants: [], enabled: false };
+    }
+    bind(patch) {
+        assert(this.state.bindingKey, 'NO_CHAT', '请先打开一个角色聊天');
+        this.settings.bindings[this.state.bindingKey] = { ...this.binding, ...copy(patch) };
+        this.save(); this.changed();
+    }
+    async refreshContext() {
+        const ctx = this.getContext();
+        const card = this.demoCard ?? ctx?.characters?.[ctx.characterId];
+        const chatId = this.demoCard ? 'demo-chat' : ctx?.getCurrentChatId?.();
+        if (!card || !chatId) {
+            this.state.bindingKey = ''; this.state.world = null; this.state.cardName = ''; this.state.cardKey = '';
+            this.changed(); return;
+        }
+        const key = (card.avatar ?? 'card') + ':' + chatId;
+        const fingerprint = await cardFingerprint(card);
+        // Do not restore a world into a chat that was switched while hashing.
+        if (!this.demoCard && this.getContext()?.getCurrentChatId?.() !== chatId) return;
+        this.state.bindingKey = key; this.state.cardKey = fingerprint;
+        this.state.cardName = card.data?.name ?? card.name ?? '当前角色卡';
+        this.state.world = null;
+        if (this.binding.worldId) await this.sync();
+        this.changed();
+    }
+    async run(work) {
+        if (this.state.busy) return;
+        this.state.busy = true; this.state.error = ''; this.changed();
+        try { return await work(); }
+        catch (error) { this.state.error = error.message ?? '操作失败'; return null; }
+        finally { this.state.busy = false; this.changed(); }
+    }
+    async listWorlds() {
+        assert(this.state.cardKey, 'NO_CHAT', '请先打开一个角色聊天');
+        this.state.worlds = await this.service.list(this.state.cardKey); this.changed();
+        return this.state.worlds;
+    }
+    async createWorld({ name, opening, origin }) {
+        assert(this.state.cardKey, 'NO_CHAT', '请先打开一个角色聊天');
+        this.state.world = await this.service.create({ name, opening, origin, cardKey: this.state.cardKey });
+        this.bind({ worldId: this.state.world.id, actorId: '', day: 0, clock: '08:00', participants: [], enabled: false });
+        this.state.notice = '世界已保存。建立人物后再开启当前聊天的联机。';
+        await this.listWorlds();
+        return this.state.world;
+    }
+    async joinWorld(id) {
+        assert(this.state.cardKey, 'NO_CHAT', '请先打开角色聊天');
+        const world = await this.service.read(id.trim(), this.state.cardKey);
+        if (world.id === this.binding.worldId && this.state.world?.id === world.id) {
+            this.state.world = world; this.state.notice = '已读取当前世界的最新记录。'; this.changed(); return;
+        }
+        this.state.world = world; this.bind({ worldId: world.id, actorId: '', day: 0, clock: '08:00', participants: [], enabled: false });
+        this.state.notice = '已读取世界。请选择归属自己的人物，或创建新人物。';
+    }
+    async sync() {
+        if (!this.binding.worldId) return null;
+        const bindingKey = this.state.bindingKey;
+        const worldId = this.binding.worldId;
+        const world = await this.service.read(worldId, this.state.cardKey);
+        if (bindingKey !== this.state.bindingKey || worldId !== this.binding.worldId) return null;
+        this.state.world = world; this.state.lastSync = new Date().toLocaleTimeString('zh-CN', { hour12: false }); this.changed();
+        return world;
+    }
+    async createActor({ name, kind = 'player', ...data }) {
+        const world = this.state.world;
+        assert(world, 'NO_WORLD', '请先加入世界');
+        const actor = makeActor({ name, ownerId: kind === 'npc' ? null : this.settings.playerId, data: profile(data), at: storyTime(this.binding.day, this.binding.clock) });
+        this.state.world = await this.service.transact(world.id, { type: 'actor.create', actor });
+        if (kind !== 'npc') this.bind({ actorId: actor.id });
+        this.state.notice = kind === 'npc' ? '公共人物已登记，尚未归属其他人时可以接手。' : '人物已归属你，其他玩家不能接手；一次只操作一个人物。';
+    }
+    async claimActor(actorId) {
+        this.state.world = await this.service.transact(this.binding.worldId, { type: 'actor.claim', actorId });
+        this.bind({ actorId });
+    }
+    selectActor(actorId) {
+        assert(this.state.world?.actors.some((row) => row.id === actorId && row.ownerId === this.settings.playerId), 'OWNERSHIP', '只能操作归属自己的人物');
+        this.bind({ actorId, participants: [] });
+    }
+    async savePolicy(delegation) {
+        this.state.world = await this.service.transact(this.binding.worldId, { type: 'actor.policy', actorId: this.binding.actorId, delegation });
+        this.state.notice = '托管范围已保存。已发生的托管经历不会在回归时自动撤销。';
+    }
+    async exitWorld(mode) {
+        this.state.world = await this.service.transact(this.binding.worldId, { type: 'actor.exit', actorId: this.binding.actorId, mode });
+        this.bind({ enabled: false, participants: [] });
+        this.state.notice = mode === 'delegated' ? '已退出游玩，角色按你的设置托管。' : '已退出游玩，角色保留为背景人物。';
+    }
+    async addStartingItem({ name, description }) {
+        assert(this.state.world && this.binding.actorId, 'NO_ACTOR', '先选择自己的人物');
+        assert(!this.state.world.events.some((event) => event.participantIds.includes(this.binding.actorId)), 'INITIAL_ONLY', '人物已经开始游玩，后续物品变化只能从正文提取');
+        const item = { id: uid(), name, description, ownerId: this.binding.actorId, createdTick: storyTime(this.binding.day, this.binding.clock).tick };
+        this.state.world = await this.service.transact(this.binding.worldId, { type: 'item.create', item });
+    }
+    saveSettings(values, secrets = {}) {
+        assert(['local', 'github'].includes(values.provider), 'INVALID_CONFIG', '存储来源无效');
+        const before = this.sourceKey();
+        const candidate = { ...this.settings, ...copy(values) };
+        const previous = this.settings;
+        this.settings = candidate;
+        try { this.configureStore(); } catch (error) { this.settings = previous; throw error; }
+        for (const slot of ['extraction', 'summary', 'reasoning']) {
+            if (previous.models?.[slot]?.endpoint !== candidate.models?.[slot]?.endpoint) this.secrets.delete('model.' + slot);
+        }
+        for (const [key, value] of Object.entries(secrets)) if (value) this.secrets.set(key, value);
+        const after = this.sourceKey();
+        if (before !== after) {
+            // A world ID alone is not a binding to a data source.
+            for (const binding of Object.values(this.settings.bindings)) {
+                binding.enabled = false; binding.worldId = ''; binding.actorId = ''; binding.participants = [];
+            }
+            this.state.world = null; this.state.worlds = [];
+        }
+        this.save(); this.state.notice = '设置已保存。密钥只保留在本次页面会话，不写进世界记录或导出文件。'; this.changed();
+    }
+    setTime(day, clock, participants = []) {
+        const time = storyTime(day, clock);
+        const view = this.state.world ? project(this.state.world, time.tick) : null;
+        assert(view && participants.every((id) => view.actors[id] && view.actors[this.binding.actorId]?.profile.location && view.actors[id].profile.location === view.actors[this.binding.actorId].profile.location), 'SCENE_NOT_FOUND', '请先在故事里找到同地点人物，再选择互动目标');
+        this.bind({ day: time.day, clock: time.clock, participants });
+    }
+    sourceKey() { return JSON.stringify({ provider: this.settings.provider, github: this.settings.provider === 'github' ? this.settings.github : null }); }
+    snapshot() { return { bindingKey: this.state.bindingKey, binding: copy(this.binding), cardKey: this.state.cardKey, sourceKey: this.sourceKey() }; }
+    matches(snapshot) { return snapshot.bindingKey === this.state.bindingKey && snapshot.binding.worldId === this.binding.worldId && snapshot.binding.actorId === this.binding.actorId && snapshot.cardKey === this.state.cardKey && snapshot.sourceKey === this.sourceKey(); }
+    async preparePrompt(input, { signal } = {}) {
+        const snapshot = this.snapshot();
+        if (!snapshot.binding.enabled) return '';
+        const world = await this.sync();
+        assert(world && this.matches(snapshot), 'CHAT_CHANGED', '聊天或世界已切换，本次未注入旧世界');
+        const time = storyTime(snapshot.binding.day, snapshot.binding.clock);
+        let responses = [];
+        if (snapshot.binding.participants?.length && input.trim()) {
+            this.state.notice = '正在等待已找到的现场人物，最多一分钟…'; this.changed();
+            const turn = this.service.stageTurn({ actorId: snapshot.binding.actorId, input, time, participantIds: snapshot.binding.participants });
+            const scene = await this.service.waitForScene(world.id, turn, { signal, intervalMs: this.settings.provider === 'github' ? 10_000 : 1000 });
+            assert(this.matches(snapshot), 'CHAT_CHANGED', '等待期间聊天已切换，未继续旧场景');
+            this.state.world = scene.world; responses = scene.responses;
+            this.state.notice = scene.timedOut ? '等待结束，正文按对方允许的托管范围继续。' : '现场行动已到达，由本方正文继续判断和叙事。';
+        }
+        return narrativePrompt(this.state.world, snapshot.binding.actorId, time, responses);
+    }
+    async captureNarration(narration, userInput, sourceKey, snapshot = this.snapshot()) {
+        const draft = { id: uid(), worldId: snapshot.binding.worldId, actorId: snapshot.binding.actorId, bindingKey: snapshot.bindingKey, storageSourceKey: snapshot.sourceKey, narration, userInput, sourceKey, time: storyTime(snapshot.binding.day, snapshot.binding.clock), createdAt: new Date().toISOString(), status: 'pending', error: '', proposal: null };
+        this.settings.pending.push(draft); this.save(); this.changed();
+        try {
+            assert(this.matches(snapshot), 'CHAT_CHANGED', '聊天已切换，原正文保留在待处理记录');
+            const world = await this.service.read(draft.worldId, snapshot.cardKey);
+            const raw = await this.models.generate('extraction', extractionPrompt(world, draft.actorId, draft.time, userInput, narration));
+            assert(this.matches(snapshot), 'CHAT_CHANGED', '提取期间聊天已切换，没有写入旧聊天');
+            draft.rawModel = raw;
+            const value = parseModelJson(raw);
+            draft.proposal = {
+                id: draft.id, authorId: this.settings.playerId, actorId: draft.actorId,
+                time: storyTime(value.time?.day, value.time?.clock), summary: value.summary,
+                location: value.location ?? '', visibility: value.visibility,
+                participantIds: [...new Set([draft.actorId, ...(value.participantIds ?? [])])],
+                knownBy: [...new Set([draft.actorId, ...(value.knownBy ?? [])])],
+                changes: value.changes, itemMoves: value.itemMoves,
+                source: { key: sourceKey, hash: await hash(narration) }, createdAt: draft.createdAt,
+            };
+            validateEvent(draft.proposal, world);
+            await this.publishDraft(draft.id);
+        } catch (error) {
+            draft.error = error.message; draft.status = 'conflict'; this.save(); this.changed();
+        }
+        return draft;
+    }
+    async publishDraft(id) {
+        const draft = this.settings.pending.find((row) => row.id === id);
+        assert(draft?.proposal, 'NO_PROPOSAL', '没有可上传的结构化事件，原正文仍然保留');
+        assert(draft.bindingKey === this.state.bindingKey && draft.worldId === this.binding.worldId && draft.actorId === this.binding.actorId, 'CHAT_CHANGED', '请返回原聊天、世界和人物后再重试');
+        assert(draft.storageSourceKey === this.sourceKey(), 'SOURCE_CHANGED', '数据来源已变化，请恢复原来源后再上传这段记录');
+        const snapshot = this.snapshot();
+        const world = await this.service.transact(draft.worldId, { type: 'event.append', event: draft.proposal });
+        draft.status = 'shared'; draft.error = '';
+        this.settings.pending = this.settings.pending.filter((row) => row.id !== id);
+        this.settings.snapshots[draft.worldId] = { revision: world.revision, at: new Date().toISOString() };
+        if (this.matches(snapshot)) {
+            this.state.world = world;
+            this.bind({ day: draft.proposal.time.day, clock: draft.proposal.time.clock });
+            this.state.notice = '本轮经历已共享并读回确认；正文没有被修改。';
+        }
+        this.save(); this.changed();
+    }
+    archiveDraft(id) {
+        const draft = this.settings.pending.find((row) => row.id === id);
+        assert(draft, 'NOT_FOUND', '待处理记录不存在');
+        this.settings.archivedDrafts.push({ ...copy(draft), status: 'personal' });
+        this.settings.pending = this.settings.pending.filter((row) => row.id !== id);
+        this.save(); this.state.notice = '已保留为个人草稿，不影响共同世界。'; this.changed();
+    }
+    async summarize() {
+        assert(this.state.world && this.binding.actorId, 'NO_ACTOR', '请先选择人物');
+        this.state.summary = await this.models.generate('summary', summaryPrompt(this.state.world, this.binding.actorId));
+        this.changed();
+    }
+    exportWorld() {
+        assert(this.state.world, 'NO_WORLD', '没有可导出的世界');
+        return JSON.stringify(copy(this.state.world), null, 2);
+    }
+}

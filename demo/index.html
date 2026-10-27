@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>共叙 · 联机世界书框架预览</title>
+  <link rel="stylesheet" href="../style.css">
+  <style>
+    html, body { margin: 0; background: #1d2d29; }
+    body { padding: 32px 16px; }
+    #preview { width: min(960px, 100%); height: min(840px, calc(100dvh - 100px)); min-height: 560px; margin: auto; border: 1px solid #768071; border-radius: 4px; overflow: hidden; box-shadow: 0 30px 100px #0005; }
+    .demo-note { width: min(960px, 100%); margin: 0 auto 14px; display: flex; flex-wrap: wrap; align-items: center; gap: 12px; font: 11px/1.6 "Microsoft YaHei", sans-serif; color: #bdc8b7; }
+    .demo-note button { border: 1px solid #b5b89b66; color: #e4dfc8; background: transparent; border-radius: 3px; padding: 5px 10px; cursor: pointer; font: inherit; }
+    #prompt-preview { display: none; max-width: 960px; margin: 20px auto; color: #d7ddcf; white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.9 "Microsoft YaHei", sans-serif; }
+    @media(max-width:640px) { body { padding: 0; } .demo-note { padding: 10px 16px; width: auto; margin: 0; } #preview { border: 0; border-radius: 0; height: calc(100dvh - 90px); min-height: 450px; } #prompt-preview { padding: 16px; } }
+  </style>
+</head>
+<body>
+  <div class="demo-note"><span>框架演示 · 数据仅在本机浏览器 · 未连接酒馆或远程 API</span><button id="demo-add">添加一轮示例经历</button><button id="demo-prompt">预览正文上下文</button></div>
+  <div id="preview"><section id="demo-panel" aria-label="共叙框架预览"></section></div>
+  <pre id="prompt-preview"></pre>
+  <script type="module" src="./demo.js"></script>
+</body>
+</html>

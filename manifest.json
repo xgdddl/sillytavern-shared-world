@@ -1,0 +1,13 @@
+{
+  "display_name": "共叙 · 联机世界书",
+  "loading_order": 90,
+  "requires": [],
+  "optional": [],
+  "js": "index.js",
+  "css": "style.css",
+  "author": "xgdddl",
+  "version": "0.1.1",
+  "homePage": "https://github.com/xgdddl/sillytavern-shared-world",
+  "auto_update": false,
+  "generate_interceptor": "sharedWorldBeforeGenerate"
+}

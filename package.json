@@ -1,0 +1,13 @@
+{
+  "name": "sillytavern-shared-world",
+  "version": "0.1.1",
+  "private": true,
+  "type": "module",
+  "description": "无房主的 SillyTavern 共享故事扩展框架",
+  "scripts": {
+    "test": "node --test tests/*.test.js",
+    "check": "node scripts/check.mjs",
+    "dev": "node scripts/serve.mjs"
+  },
+  "engines": { "node": ">=20" }
+}
