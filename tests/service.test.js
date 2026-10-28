@@ -36,6 +36,35 @@ test('两边先发布行动再等待，不会互相等待到死锁', async () =>
     assert.equal(ra.timedOut, false); assert.equal(rb.timedOut, false);
     assert.equal(ra.responses[0].input, '我举盾'); assert.equal(rb.responses[0].input, '我拔剑');
 });
+test('连续两轮不会把对方上一轮行动当作新回复', async () => {
+    const store = new MemoryStore(); await store.write('world-one', fixture(), null);
+    const a = new WorldService(store, 'pa'), b = new WorldService(store, 'pb');
+    const make = (service, actorId, other, input) => service.stageTurn({ actorId, input, time: storyTime(0, '08:00'), participantIds: [other] });
+    const firstA = make(a, 'a', 'b', '第一轮甲'), firstB = make(b, 'b', 'a', '第一轮乙');
+    const first = await Promise.all([a.waitForScene('world-one', firstA, { intervalMs: 5 }), b.waitForScene('world-one', firstB, { intervalMs: 5 })]);
+    assert.equal(first[0].responses[0].input, '第一轮乙');
+    assert.equal(first[1].responses[0].input, '第一轮甲');
+    const secondA = make(a, 'a', 'b', '第二轮甲'); secondA.expiresAt = Date.now() + 45;
+    const second = await a.waitForScene('world-one', secondA, { intervalMs: 5 });
+    assert.equal(second.timedOut, true);
+    assert.deepEqual(second.responses, []);
+    const thirdA = make(a, 'a', 'b', '新一轮甲'), thirdB = make(b, 'b', 'a', '新一轮乙');
+    const third = await Promise.all([a.waitForScene('world-one', thirdA, { intervalMs: 5 }), b.waitForScene('world-one', thirdB, { intervalMs: 5 })]);
+    assert.equal(third[0].responses[0].input, '新一轮乙');
+    assert.equal(third[1].responses[0].input, '新一轮甲');
+});
+test('三人同场时每个人都能读取本轮其他两人的行动', async () => {
+    const store = new MemoryStore(), world = fixture();
+    world.actors.push(makeActor({ id: 'c', name: '丙', ownerId: 'pc', data: { location: '王城' } }));
+    await store.write('world-one', world, null);
+    const ids = ['a', 'b', 'c'], services = ids.map((id) => new WorldService(store, 'p' + id));
+    const turns = services.map((service, index) => service.stageTurn({ actorId: ids[index], input: ids[index] + '的行动', time: storyTime(0, '08:00'), participantIds: ids.filter((id) => id !== ids[index]) }));
+    const results = await Promise.all(services.map((service, index) => service.waitForScene('world-one', turns[index], { intervalMs: 5 })));
+    for (let i = 0; i < ids.length; i++) {
+        assert.equal(results[i].timedOut, false);
+        assert.deepEqual(results[i].responses.map((row) => row.input).sort(), ids.filter((id) => id !== ids[i]).map((id) => id + '的行动').sort());
+    }
+});
 test('没有回应时在期限内退出等待，其他世界不受影响', async () => {
     const store = new MemoryStore(); await store.write('world-one', fixture(), null);
     const a = new WorldService(store, 'pa');

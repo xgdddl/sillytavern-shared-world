@@ -89,12 +89,18 @@ export class WorldController extends EventTarget {
     }
     async listWorlds() {
         assert(this.state.cardKey, 'NO_CHAT', '请先打开一个角色聊天');
-        this.state.worlds = await this.service.list(this.state.cardKey); this.changed();
+        const snapshot = this.snapshot();
+        const worlds = await this.service.list(snapshot.cardKey);
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '读取世界列表期间聊天或数据来源已切换，请在当前聊天重新读取');
+        this.state.worlds = worlds; this.changed();
         return this.state.worlds;
     }
     async createWorld({ name, opening, origin }) {
         assert(this.state.cardKey, 'NO_CHAT', '请先打开一个角色聊天');
-        this.state.world = await this.service.create({ name, opening, origin, cardKey: this.state.cardKey });
+        const snapshot = this.snapshot();
+        const world = await this.service.create({ name, opening, origin, cardKey: snapshot.cardKey });
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '世界已在原数据来源创建；聊天或来源已切换，请切回原处查找，不会自动绑定当前聊天');
+        this.state.world = world;
         this.bind({ worldId: this.state.world.id, actorId: '', day: 0, clock: '08:00', participants: [], enabled: false });
         this.state.notice = '世界已保存。建立人物后再开启当前聊天的联机。';
         await this.listWorlds();
@@ -102,25 +108,31 @@ export class WorldController extends EventTarget {
     }
     async joinWorld(id) {
         assert(this.state.cardKey, 'NO_CHAT', '请先打开角色聊天');
-        const world = await this.service.read(id.trim(), this.state.cardKey);
+        const snapshot = this.snapshot();
+        const world = await this.service.read(id.trim(), snapshot.cardKey);
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '读取期间聊天或数据来源已切换，请在当前聊天重新加入');
         if (world.id === this.binding.worldId && this.state.world?.id === world.id) {
             this.state.world = world; this.state.notice = '已读取当前世界的最新记录。'; this.changed(); return;
         }
         if (this.binding.enabled) await this.releaseControl();
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '读取期间聊天或数据来源已切换，请在当前聊天重新加入');
         const saved = this.settings.worldProgress[this.bindingStoreKey + ':' + world.id];
         this.state.world = world; this.bind(saved ? { ...saved, enabled: false } : { worldId: world.id, actorId: '', day: 0, clock: '08:00', participants: [], enabled: false });
         this.state.notice = '已读取世界。请选择归属自己的人物，或创建新人物。';
     }
     async sync() {
         if (!this.binding.worldId) return null;
-        const bindingKey = this.state.bindingKey;
-        const worldId = this.binding.worldId;
-        let world = await this.service.read(worldId, this.state.cardKey);
-        if (bindingKey !== this.state.bindingKey || worldId !== this.binding.worldId) return null;
+        const snapshot = this.snapshot();
+        const bindingKey = snapshot.bindingKey;
+        const worldId = snapshot.binding.worldId;
+        const service = this.service;
+        let world = await service.read(worldId, snapshot.cardKey);
+        if (!this.matches(snapshot)) return null;
         for (const candidate of world.proposals ?? []) {
-            if (candidate.event.authorId !== this.settings.playerId || candidate.expiresAt > Date.now() || candidate.status === 'conflict') continue;
-            try { world = await this.service.transact(worldId, { type: 'proposal.expire', eventId: candidate.event.id }); }
-            catch (error) { this.state.error = '现场结果尚未共享：' + error.message; }
+            if (candidate.event.authorId !== snapshot.playerId || candidate.expiresAt > Date.now() || candidate.status === 'conflict') continue;
+            try { world = await service.transact(worldId, { type: 'proposal.expire', eventId: candidate.event.id }); }
+            catch (error) { if (this.matches(snapshot)) this.state.error = '现场结果尚未共享：' + error.message; }
+            if (!this.matches(snapshot)) return null;
         }
         for (const candidate of world.proposals ?? []) {
             if (candidate.event.authorId !== this.settings.playerId || candidate.event.actorId !== this.binding.actorId || this.settings.pending.some((row) => row.id === candidate.event.id && row.storageSourceKey === this.sourceKey())) continue;
@@ -211,6 +223,7 @@ export class WorldController extends EventTarget {
         assert(!this.settings.pending.some((row) => row.worldId === snapshot.binding.worldId && row.actorId === snapshot.binding.actorId && row.storageSourceKey === snapshot.sourceKey), 'UNRESOLVED_DRAFT', '本人物还有未确认的正文，请先在年表中解决冲突、等待现场结果，或保留为个人草稿后再续写');
         const time = storyTime(snapshot.binding.day, snapshot.binding.clock);
         await this.acquireControl();
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '获取人物控制期间聊天或数据来源已切换，未继续旧场景');
         let responses = [];
         const participants = snapshot.binding.participants?.length ? snapshot.binding.participants : sceneActors(world, snapshot.binding.actorId, time).filter((row) => row.ownerId && row.ownerId !== this.settings.playerId && row.exitMode !== 'background').map((row) => row.id);
         if (participants.length && input.trim()) {
@@ -257,6 +270,7 @@ export class WorldController extends EventTarget {
         assert(draft.storageSourceKey === this.sourceKey(), 'SOURCE_CHANGED', '数据来源已变化，请恢复原来源后再上传这段记录');
         const snapshot = this.snapshot();
         await this.acquireControl();
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '获取人物控制期间聊天或数据来源已切换，正文仍保留为草稿');
         const world = await this.service.transact(draft.worldId, { type: 'event.append', event: draft.proposal, sessionId: this.sessionId });
         const candidate = world.proposals?.find((row) => row.event.id === draft.id);
         if (candidate) {
@@ -308,8 +322,11 @@ export class WorldController extends EventTarget {
         if (this.binding.worldId && this.binding.actorId) await this.service.transact(this.binding.worldId, { type: 'control.release', actorId: this.binding.actorId, sessionId: this.sessionId });
     }
     async setEnabled(enabled) {
-        if (enabled) { await this.acquireControl(); this.bind({ enabled: true }); }
-        else { await this.releaseControl(); this.bind({ enabled: false }); }
+        const snapshot = this.snapshot();
+        if (enabled) await this.acquireControl();
+        else await this.releaseControl();
+        assert(this.matches(snapshot), 'CHAT_CHANGED', '操作期间聊天或数据来源已切换，请在当前聊天重新设置联机状态');
+        this.bind({ enabled: Boolean(enabled) });
     }
     async connect(write = true) {
         assert(this.settings.provider === 'github', 'LOCAL_ONLY', '请先保存 GitHub 数据来源设置');

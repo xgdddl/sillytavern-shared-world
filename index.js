@@ -28,7 +28,7 @@ async function initialize() {
         const note = document.createElement('p'); note.textContent = '共同历史 · 在所选聊天中开启联机';
         block.append(title, note, button); target.append(block);
     } else { button.className = 'sw-floating-launcher'; document.body.append(button); }
-    globalThis.sharedWorld = { version: '1.0.0-rc.2', open: () => panel.open() };
+    globalThis.sharedWorld = { version: '1.0.0-rc.3', open: () => panel.open() };
     await controller.refreshContext();
     const invite = new URL(location.href).searchParams.get('sworld');
     if (invite) {

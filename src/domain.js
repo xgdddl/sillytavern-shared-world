@@ -1,5 +1,5 @@
 import { sha256Bytes } from './sha256.js';
-export const FORMAT = 'shared-world/2';
+export const FORMAT = 'shared-world/3';
 export const MAX_ACTORS = 3;
 export const MAX_WAIT_MS = 60_000;
 export const PROFILE_FIELDS = Object.freeze(['identity', 'background', 'personality', 'abilities', 'location', 'status', 'relationships']);
@@ -84,7 +84,7 @@ export function makeWorld({ id = uid(), name, cardKey, opening = '', origin = '�
 }
 export function validateWorld(world) {
     object(world, '世界');
-    assert([FORMAT, 'shared-world/1'].includes(world.format), 'UNSUPPORTED_FORMAT', '世界格式不兼容，原数据已保留');
+    assert([FORMAT, 'shared-world/1', 'shared-world/2'].includes(world.format), 'UNSUPPORTED_FORMAT', '世界格式不兼容，原数据已保留');
     text(world.id, '世界编号', 100); text(world.cardKey, '角色卡版本标识', 200); text(world.name, '世界名称', 100);
     assert(Number.isSafeInteger(world.revision) && world.revision >= 0, 'INVALID_DATA', '世界版本无效');
     array(world.actors, '人物', 2000);
@@ -118,6 +118,14 @@ export function validateWorld(world) {
         text(turn.input, '场景行动内容', 12000);
         array(turn.participantIds, '场景参与者', 100);
         assert(Number.isFinite(turn.createdAt) && Number.isFinite(turn.expiresAt), 'INVALID_DATA', '场景等待期限无效');
+        if (turn.observedBy !== undefined) {
+            object(turn.observedBy, '行动读取记录');
+            assert(Object.keys(turn.observedBy).length <= 100, 'INVALID_DATA', '行动读取记录过多');
+            for (const [actorId, turnId] of Object.entries(turn.observedBy)) {
+                assert(ids.has(actorId), 'INVALID_DATA', '行动读取者不存在');
+                text(turnId, '读取方行动编号', 100);
+            }
+        }
     }
     for (const control of array(world.controls ?? [], '设备控制', 200)) {
         assert(world.actors.some((actor) => actor.id === control.actorId && actor.ownerId === control.playerId), 'OWNERSHIP', '设备控制的归属无效');
@@ -265,6 +273,17 @@ export function applyOperation(input, operation) {
         assert(world.actors.some((actor) => actor.id === turn.actorId && actor.ownerId === operation.playerId), 'OWNERSHIP', '不是该人物的控制者');
         world.turns = (world.turns ?? []).filter((row) => row.actorId !== turn.actorId && row.expiresAt > Date.now());
         world.turns.push(turn);
+    } else if (operation.type === 'turn.observe') {
+        const observer = world.turns?.find((row) => row.id === operation.turnId && row.authorId === operation.playerId);
+        assert(observer && observer.expiresAt > Date.now(), 'TURN_EXPIRED', '当前行动已过期或被更新，不能读取旧现场');
+        for (const targetId of array(operation.targetIds, '现场行动编号', 100)) {
+            const target = world.turns.find((row) => row.id === targetId);
+            assert(target && target.expiresAt > Date.now() && observer.participantIds.includes(target.actorId) && target.participantIds.includes(observer.actorId), 'TURN_CHANGED', '现场行动已经变化，需要重新读取');
+            assert(Math.abs(target.time.tick - observer.time.tick) <= 10 && (!target.location || !observer.location || target.location === observer.location), 'TURN_CHANGED', '现场地点或时间已经变化，需要重新读取');
+            target.observedBy ||= {};
+            assert(!target.observedBy[observer.actorId] || target.observedBy[observer.actorId] === observer.id, 'TURN_USED', '对方这一轮行动已经被上一轮读取');
+            target.observedBy[observer.actorId] = observer.id;
+        }
     } else if (operation.type === 'proposal.expire') {
         const candidate = world.proposals?.find((row) => row.event.id === operation.eventId && row.event.authorId === operation.playerId);
         assert(candidate, 'NOT_FOUND', '没有属于你的待处理现场结果');

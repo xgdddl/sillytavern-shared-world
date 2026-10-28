@@ -136,9 +136,12 @@ test('取得设备控制后，旧设备不能继续把已经生成的正文写�
     assert.throws(() => applyOperation(world, { type: 'event.append', playerId: 'pa', sessionId: 'old', event: event() }), /控制已过期或转移/);
 });
 test('旧版历史保留并升级格式，旧客户端不会把新版事实当普通旧存档改写', () => {
-    const legacy = fixture(); legacy.format = 'shared-world/1';
-    const upgraded = append(legacy, event());
-    assert.equal(upgraded.format, 'shared-world/2'); assert.equal(legacy.format, 'shared-world/1');
+    for (const format of ['shared-world/1', 'shared-world/2']) {
+        const legacy = fixture(); legacy.format = format;
+        const upgraded = append(legacy, event());
+        assert.equal(upgraded.format, 'shared-world/3'); assert.equal(legacy.format, format);
+        assert.equal(upgraded.events.length, 1);
+    }
 });
 test('复用酒馆模型超时能停止后台生成，取消函数失败也能返回并保留草稿', async () => {
     const router = new ModelRouter({ timeoutMs: 10, getSettings: () => ({ models: {} }), getSecret: () => '', getContext: () => ({ generateRaw: () => new Promise(() => {}), stopGeneration: () => { throw new Error('cancel failed'); } }) });

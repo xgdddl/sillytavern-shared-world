@@ -60,10 +60,20 @@ export class WorldService {
         const bounded = signal ? AbortSignal.any([signal, timeout]) : timeout;
         let world = await this.transact(id, { type: 'turn.stage', turn }, { signal: bounded, deadline });
         const wanted = turn.participantIds.filter((actorId) => actorId !== turn.actorId && world.actors.some((actor) => actor.id === actorId && actor.ownerId && actor.ownerId !== this.playerId));
-        const collect = () => (world.turns ?? []).filter((row) => wanted.includes(row.actorId) && row.expiresAt > Date.now() && Math.abs(row.time.tick - turn.time.tick) <= 10 && (!row.location || !turn.location || row.location === turn.location) && row.participantIds.includes(turn.actorId));
+        const collect = () => (world.turns ?? []).filter((row) => wanted.includes(row.actorId) && row.expiresAt > Date.now() && Math.abs(row.time.tick - turn.time.tick) <= 10 && (!row.location || !turn.location || row.location === turn.location) && row.participantIds.includes(turn.actorId) && (!row.observedBy?.[turn.actorId] || row.observedBy[turn.actorId] === turn.id));
+        const confirmed = () => collect().filter((row) => row.observedBy?.[turn.actorId] === turn.id);
         try {
             while (wanted.length && Date.now() < deadline) {
-                const responses = collect();
+                const pending = collect().filter((row) => row.observedBy?.[turn.actorId] !== turn.id);
+                if (pending.length) {
+                    try {
+                        world = await this.transact(id, { type: 'turn.observe', turnId: turn.id, targetIds: pending.map((row) => row.id) }, { signal: bounded, deadline });
+                    } catch (error) {
+                        if (!['TURN_USED', 'TURN_CHANGED'].includes(error.code)) throw error;
+                        world = await this.read(id, undefined, { signal: bounded });
+                    }
+                }
+                const responses = confirmed();
                 if (wanted.every((actorId) => responses.some((row) => row.actorId === actorId))) return { world, responses, timedOut: false };
                 await sleep(Math.min(intervalMs, deadline - Date.now()), bounded);
                 if (Date.now() >= deadline) break;
@@ -72,7 +82,7 @@ export class WorldService {
         } catch (error) {
             if (signal?.aborted || !timeout.aborted) throw error;
         }
-        return { world, responses: collect(), timedOut: wanted.length > collect().length };
+        return { world, responses: confirmed(), timedOut: wanted.length > confirmed().length };
     }
     stageTurn({ actorId, input, time, participantIds, location = '' }) {
         return { id: uid(), actorId, authorId: this.playerId, input, location, time: storyTime(time.day, time.clock), participantIds: [...new Set([actorId, ...participantIds])], createdAt: Date.now(), expiresAt: Date.now() + MAX_WAIT_MS };

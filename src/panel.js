@@ -35,7 +35,7 @@ export class WorldPanel {
         const transientPasswords = new Map(Array.from(this.root.querySelectorAll('input[type="password"]')).map((el) => [el.name, el.value]));
         const content = this.tab === 'world' ? this.world() : this.tab === 'actors' ? this.actors() : this.tab === 'history' ? this.history() : this.settings();
         this.root.innerHTML = [
-            '<header class="sw-header"><div class="sw-brand"><span class="sw-seal" aria-hidden="true">叙</span><div><div class="sw-eyebrow">SHARED WORLD · 1.0.0-rc.2</div><h1>共叙<span>联机世界书</span></h1></div></div>',
+            '<header class="sw-header"><div class="sw-brand"><span class="sw-seal" aria-hidden="true">叙</span><div><div class="sw-eyebrow">SHARED WORLD · 1.0.0-rc.3</div><h1>共叙<span>联机世界书</span></h1></div></div>',
             '<div class="sw-header-right"><span class="sw-status"><i class="' + (b.enabled ? 'is-active' : '') + '"></i>' + (b.enabled ? '当前聊天已开启' : '当前聊天未开启') + '</span>' + (this.standalone ? '' : button('关闭', 'close', '', 'sw-quiet')) + '</div></header>',
             '<nav class="sw-tabs" aria-label="世界书导航">' + [['world', '世界'], ['actors', '人物'], ['history', '年表'], ['settings', '设置']].map(([id, label], index) => '<button type="button" data-tab="' + id + '" aria-current="' + (id === this.tab ? 'page' : 'false') + '"><span>0' + (index + 1) + '</span>' + label + (id === 'history' && c.settings.pending.length ? '<b>' + c.settings.pending.length + '</b>' : '') + '</button>').join('') + '</nav>',
             '<main class="sw-main" aria-busy="' + s.busy + '">' + (s.error ? '<div class="sw-message sw-error" role="alert">' + h(s.error) + '</div>' : '') + (s.notice ? '<div class="sw-message" role="status">' + h(s.notice) + '</div>' : '') + content + '</main>',
