@@ -6,7 +6,7 @@
   "js": "index.js",
   "css": "style.css",
   "author": "xgdddl",
-  "version": "1.0.0-rc.3",
+  "version": "1.0.0-rc.4",
   "homePage": "https://github.com/xgdddl/sillytavern-shared-world",
   "auto_update": false,
   "generate_interceptor": "sharedWorldBeforeGenerate"

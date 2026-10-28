@@ -8,14 +8,23 @@ const sleep = (ms, signal) => new Promise((resolve, reject) => {
 });
 export class WorldService {
     constructor(store, playerId) { this.store = store; this.playerId = playerId; }
+    async readback(id, accepts, { signal, deadline = Date.now() + MAX_WAIT_MS } = {}) {
+        for (let attempt = 0; attempt < 5; attempt++) {
+            signal?.throwIfAborted();
+            const result = await this.store.read(id, { signal });
+            if (result && accepts(result.world)) return result.world;
+            if (attempt === 4 || Date.now() >= deadline) break;
+            await sleep(Math.min(150 * 2 ** attempt, Math.max(0, deadline - Date.now())), signal);
+        }
+        throw new WorldError('READBACK', '上传后尚未读回确认，请稍后读取世界“' + id + '”；原正文保留，不要重复创建', { worldId: id });
+    }
     async create(input) {
         await this.authorize();
         const world = makeWorld(input);
-        assert(!(await this.store.read(world.id)), 'WORLD_EXISTS', '这个世界编号已经存在');
-        await this.store.write(world.id, world, null);
-        const result = await this.store.read(world.id);
-        assert(result?.world.id === world.id, 'READBACK', '写入后没有读回世界记录');
-        return result.world;
+        const deadline = Date.now() + MAX_WAIT_MS, signal = AbortSignal.timeout(MAX_WAIT_MS);
+        assert(!(await this.store.read(world.id, { signal })), 'WORLD_EXISTS', '这个世界编号已经存在');
+        await this.store.write(world.id, world, null, { signal });
+        return this.readback(world.id, (saved) => saved.id === world.id, { signal, deadline });
     }
     async read(id, cardKey, options = {}) {
         const result = await this.store.read(id, options);
@@ -42,10 +51,7 @@ export class WorldService {
             next.revision = current.world.revision + 1;
             try {
                 await this.store.write(id, next, current.token, { signal });
-                const saved = await this.store.read(id, { signal });
-                assert(saved && saved.world.revision >= next.revision, 'READBACK', '上传后未确认持久化结果，保留待处理状态');
-                if (op.type === 'event.append') assert(saved.world.events.some((event) => event.id === op.event.id || (op.event.source && event.source?.key === op.event.source.key && event.source.hash === op.event.source.hash)) || saved.world.proposals?.some((row) => row.event.id === op.event.id), 'READBACK', '上传事件未读回');
-                return saved.world;
+                return await this.readback(id, (saved) => saved.revision >= next.revision && (op.type !== 'event.append' || saved.events.some((event) => event.id === op.event.id || (op.event.source && event.source?.key === op.event.source.key && event.source.hash === op.event.source.hash)) || saved.proposals?.some((row) => row.event.id === op.event.id)), { signal, deadline });
             } catch (error) {
                 if (error.code !== 'STORAGE_CONFLICT' || attempt === 7) throw error;
                 const wait = Math.min(80 * 2 ** attempt, 1500, Math.max(0, deadline - Date.now()));

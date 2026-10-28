@@ -47,6 +47,26 @@ test('没有原文证据的新人物和事实不会变成共享记录', () => {
     const draft = { id: 'x', actorId: 'a', narration: '甲喝茶。' };
     assert.throws(() => normalizeRecord({ time: { day: 0, clock: '08:00' }, newActors: [{ name: '不存在', evidence: '甲登基了' }] }, fixture(), draft, 'pa'), /依据不在/);
 });
+test('新物品同时给出最终归属与赠送过程时，只为新物品还原初始归属', () => {
+    const world = fixture(), draft = { id: 'gift-new', actorId: 'a', narration: '乙将一瓶药送给甲。' };
+    const record = normalizeRecord({ summary: draft.narration, time: { day: 0, clock: '08:00' }, newItems: [{ ref: 'gift', name: '药', ownerId: 'a', quantity: 1, evidence: '一瓶药' }], itemMoves: [{ itemId: 'gift', fromActorId: 'b', toActorId: 'a' }] }, world, draft, 'pb');
+    record.actorId = 'b';
+    assert.equal(record.newItems[0].ownerId, 'b');
+    const saved = append(world, record);
+    assert.equal(project(saved).items[record.newItems[0].id].ownerId, 'a');
+    assert.equal(world.items.length, 0);
+});
+test('已存在物品或矛盾的赠送链不能通过新物品兼容处理改写归属', () => {
+    const world = fixture(), draft = { id: 'gift-old', actorId: 'a', narration: '乙将一瓶药送给甲。' };
+    world.items.push({ id: 'old-medicine', name: '旧药', ownerId: 'b', createdTick: 0 });
+    const base = { summary: draft.narration, time: { day: 0, clock: '08:00' }, newItems: [{ ref: 'gift', name: '旧药', existingItemId: 'old-medicine', ownerId: 'a', evidence: '一瓶药' }], itemMoves: [{ itemId: 'gift', fromActorId: 'a', toActorId: 'b' }] };
+    const record = normalizeRecord(base, world, draft, 'pa');
+    assert.equal(record.newItems.length, 0);
+    assert.throws(() => append(world, record), /物品归属/);
+    base.newItems = [{ ref: 'gift', name: '药', ownerId: 'a', evidence: '一瓶药' }];
+    base.itemMoves.push({ itemId: 'gift', fromActorId: 'a', toActorId: 'b' });
+    assert.throws(() => normalizeRecord(base, world, draft, 'pa'), /转移过程前后矛盾/);
+});
 test('已知别名重新出现不会重复登记，歧义引用拒绝猜测', () => {
     const world = fixture(); world.actors[1].aliases = ['老乙'];
     const record = normalizeRecord({ summary: '老乙走来', time: { day: 0, clock: '08:00' }, newActors: [{ ref: 'found', name: '老乙', evidence: '老乙' }], participantIds: ['found'] }, world, { id: 'alias', actorId: 'a', narration: '老乙走来' }, 'pa');

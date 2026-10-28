@@ -56,6 +56,20 @@ export function normalizeRecord(value, world, draft, authorId) {
         itemChanges: (value.itemChanges ?? []).map((row) => ({ itemId: itemId(row.itemId), field: row.field, value: row.value })),
         facts, newActors, newItems, createdAt: draft.createdAt,
     };
+    // Some models describe a newly discovered item's final owner while also listing
+    // the transfer that produced that owner. Reconstruct only this new item's
+    // starting owner, and only when the supplied transfer chain is consistent.
+    for (const item of newItems) {
+        const moves = result.itemMoves.filter((move) => move.itemId === item.id);
+        if (!moves.length) continue;
+        let owner = moves[0].fromActorId;
+        for (const move of moves) {
+            assert(move.fromActorId === owner, 'HISTORY_CONFLICT', '新物品的转移过程前后矛盾，请重新提取；原正文保留');
+            owner = move.toActorId;
+        }
+        assert(item.ownerId === moves[0].fromActorId || item.ownerId === owner, 'HISTORY_CONFLICT', '新物品的归属与转移过程不符，请重新提取；原正文保留');
+        if (item.ownerId === owner) item.ownerId = moves[0].fromActorId;
+    }
     if (draft.scene) {
         const states = {};
         const view = project(world, at.tick);

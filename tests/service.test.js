@@ -15,6 +15,23 @@ test('双客户端同时追加不相关事件，完整保留双方历史', async
     const saved = await store.read('world-one');
     assert.equal(saved.world.events.length, 2); assert.equal(saved.world.revision, 2);
 });
+test('创建后短暂读不到文件，只重试读取而不重复创建', async () => {
+    const store = new MemoryStore(), read = store.read.bind(store), write = store.write.bind(store);
+    let hidden = 0, writes = 0;
+    store.write = async (...args) => { writes++; const saved = await write(...args); hidden = 2; return saved; };
+    store.read = async (...args) => hidden-- > 0 ? null : read(...args);
+    const world = await new WorldService(store, 'pa').create({ id: 'eventual-world', name: '延迟读回', cardKey: 'card' });
+    assert.equal(world.id, 'eventual-world'); assert.equal(writes, 1);
+});
+test('追加成功后暂时读到旧版本，不重复上传并等待自己的事件出现', async () => {
+    const store = new MemoryStore(), original = fixture(); await store.write(original.id, original, null);
+    const read = store.read.bind(store), write = store.write.bind(store);
+    let stale = 0, writes = 0;
+    store.write = async (...args) => { writes++; const saved = await write(...args); stale = 2; return saved; };
+    store.read = async (...args) => stale-- > 0 ? { world: original, token: '0' } : read(...args);
+    const world = await new WorldService(store, 'pa').transact(original.id, { type: 'event.append', event: event() });
+    assert.equal(world.events.length, 1); assert.equal(writes, 1);
+});
 test('同时接手一个NPC只成功一人，失败不会抢走归属', async () => {
     const store = new MemoryStore(), world = fixture();
     world.actors.push(makeActor({ id: 'npc', name: 'NPC' }));

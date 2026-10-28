@@ -32,6 +32,7 @@ export function extractionPrompt(world, actorId, time, input, narration) {
         '扩展结构：scope 为 world（影响全世界）、scene（现场）、personal（个人）。新增 newActors:[{ref:"new:npc1",name:"名字",aliases:[],profile:{identity:"",background:"",personality:"",abilities:"",location:"",status:"",relationships:""},evidence:"原正文中逐字引用的依据"}]；已有人的别名用 existingActorId 指向已有编号，不能重复造人。',
         '新增 newItems:[{ref:"new:item1",name:"物品名",description:"",ownerId:"人物编号或new:npc1或null",quantity:1,status:"可用",evidence:"原文逐字引用"}]；如果只是已有物品的别称，用 existingItemId，不重复登记。同名普通物品可能是不同件，必须依据上下文。',
         '物品消耗或损坏用 itemChanges:[{itemId:"已有编号或new:item1",field:"quantity或status或description",value:0}]。所有人物/物品引用可使用新实体的 ref。changes 的 value 必须是更新后的完整字段，保留未失效的旧能力和关系。',
+        'newItems 的 ownerId、quantity 是本轮变化前的初始值；itemMoves 按正文先后列出转移，itemChanges 填本轮结束后的数量和状态。也可直接登记新物品的最终状态，但此时不要重复列出已经包含的变化。同类同归属物品优先合并数量；两瓶药用掉一瓶后剩余 quantity=1；单独登记已消耗物品时 quantity=0，不能仅写“已饮用”却仍有一瓶库存。',
         '新增 facts:[{key:"稳定且沿用已有的事实标识",label:"事实名称",value:"结果",scope:"world或location或personal",exclusive:true,previous:null,evidence:"原文逐字引用"}]。国王归属、唯一物品归属、门是否开启、世界结局等持续影响他人的事实都必须提取。影响全世界的事件必须 scope=world。',
         '独占事实（例如某国帝王）使用同一个 key，例如 ruler:王国名；value 使用人物编号。previous 必须为所承接的旧值，首次为 null；只有正文明确交代交接、推翻或改变时才可填写旧值并替换。没有正文依据不要创造或撤销事实。',
         '已经确认的事实与未来因果约束：' + JSON.stringify({ now: project(world, time.tick).facts, future: world.events.filter((event) => event.time.tick > time.tick && (event.scope === 'world' || event.facts?.length)).map((event) => ({ time: event.time, summary: event.summary, facts: event.facts })) }),
