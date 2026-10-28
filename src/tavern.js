@@ -6,10 +6,12 @@ export function attachTavern(controller, getContext) {
     const error = (reason) => { controller.state.error = reason.message ?? '联机处理失败'; controller.changed(); };
     const refresh = async () => {
         waitAbort?.abort(new Error('聊天已切换')); capture = null; clearPrompt();
+        try { await controller.releaseControl?.(); } catch { /* lease expires if the network is unavailable */ }
         try { await controller.refreshContext(); } catch (reason) { error(reason); }
     };
     const intercept = async (_chat, _contextSize, abort, type) => {
-        if (['quiet', 'raw', 'impersonate'].includes(type) || controller.models.depth) return;
+        if (['quiet', 'raw', 'impersonate'].includes(type)) return;
+        if (controller.models.depth) { error(new Error('上一轮资料仍在处理，请等待结束后再续写')); abort(false); return; }
         clearPrompt();
         if (!controller.binding.enabled) return;
         stopped = false;
@@ -22,7 +24,7 @@ export function attachTavern(controller, getContext) {
             const prompt = await controller.preparePrompt(input, { signal: waitAbort.signal });
             if (!controller.matches(snapshot)) throw new Error('聊天已切换，已停止旧世界的生成');
             getContext().setExtensionPrompt(PROMPT_KEY, prompt, 1, 0, false, 0);
-            capture = { snapshot, input };
+            capture = { snapshot: { ...snapshot, scene: controller.preparedScene ?? null }, input };
         } catch (reason) {
             clearPrompt(); capture = null; error(reason); abort(false);
         }
@@ -45,10 +47,10 @@ export function attachTavern(controller, getContext) {
     events.on(types.GENERATION_ENDED, ended);
     events.on(types.GENERATION_STOPPED, stop);
     const interval = setInterval(async () => {
-        if (syncing || capture || controller.models.depth || !controller.binding.enabled) return;
+        if (syncing || !controller.binding.enabled) return;
         syncing = true;
-        try { await controller.sync(); } catch (reason) { error(reason); } finally { syncing = false; }
-    }, 30_000);
+        try { if (!capture && !controller.models.depth) await controller.sync(); await controller.acquireControl?.(); } catch (reason) { error(reason); } finally { syncing = false; }
+    }, 20_000);
     return {
         intercept,
         dispose() {

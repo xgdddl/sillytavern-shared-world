@@ -1,4 +1,4 @@
-import { WorldError, assert, copy, validateWorld } from './domain.js';
+import { WorldError, assert, copy, hash, validateWorld } from './domain.js';
 
 const safeId = (id) => {
     assert(typeof id === 'string' && /^[a-zA-Z0-9_-]{1,100}$/.test(id), 'INVALID_ID', '世界编号不合法');
@@ -74,11 +74,12 @@ export class GitHubStore {
         assert(!directory.split('/').some((part) => part === '..' || part === '.' || !part), 'INVALID_CONFIG', '数据目录不合法');
         this.owner = owner; this.repo = repo; this.branch = branch; this.directory = directory;
         this.token = token; this.fetchImpl = fetchImpl; this.label = 'GitHub · ' + owner + '/' + repo;
+        this.cache = new Map(); this.chunks = new Map();
     }
-    async request(path, { method = 'GET', body, signal } = {}) {
+    async request(path, { method = 'GET', body, signal, headers: extra = {} } = {}) {
         const key = this.token();
         const timeout = AbortSignal.timeout(15_000);
-        const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' };
+        const headers = { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28', ...extra };
         if (key) headers.Authorization = 'Bearer ' + key;
         if (body) headers['Content-Type'] = 'application/json';
         const response = await this.fetchImpl('https://api.github.com/repos/' + this.owner + '/' + this.repo + path, {
@@ -86,21 +87,48 @@ export class GitHubStore {
             signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
         });
         if (response.status === 404 && method === 'GET') return null;
+        if (response.status === 304) return { notModified: true };
         if (response.status === 409) throw new WorldError('STORAGE_CONFLICT', 'GitHub 上的版本已更新，需要重新读取');
         if (!response.ok) {
             const label = response.status === 403 || response.status === 429 ? '访问受限或达到请求限制，请稍后重试' : '请求失败，请检查仓库、分支和读写权限';
             throw new WorldError('REMOTE_ERROR', 'GitHub ' + response.status + '：' + label, { status: response.status });
         }
-        return response.json();
+        const result = await response.json();
+        if (result && !Array.isArray(result)) Object.defineProperty(result, '_etag', { value: response.headers?.get?.('etag') });
+        return result;
     }
     path(id) { return '/contents/' + this.directory.split('/').map(encodeURIComponent).join('/') + '/' + safeId(id) + '.json'; }
     async read(id, options = {}) {
-        const result = await this.request(this.path(id) + '?ref=' + encodeURIComponent(this.branch), options);
+        const cached = this.cache.get(id);
+        const result = await this.request(this.path(id) + '?ref=' + encodeURIComponent(this.branch), { ...options, headers: cached?.etag ? { 'If-None-Match': cached.etag } : {} });
         if (!result) return null;
+        if (result.notModified) { assert(cached, 'REMOTE_FORMAT', '缓存版本缺失，请重试'); return copy(cached.value); }
         assert(result.encoding === 'base64' && typeof result.content === 'string', 'REMOTE_FORMAT', '世界文件过大或返回格式不支持');
-        const world = parseStored(decode64(result.content));
+        const envelope = JSON.parse(decode64(result.content));
+        let raw = envelope;
+        if (envelope.format === 'shared-world/chunks/1') {
+            assert(Array.isArray(envelope.parts) && envelope.parts.length <= 1000, 'REMOTE_FORMAT', '分片索引损坏');
+            let combined = '';
+            for (const part of envelope.parts) {
+                assert(/^[a-f0-9]{64}$/.test(part), 'REMOTE_FORMAT', '分片标识无效');
+                let data = this.chunks.get(part);
+                if (data === undefined) {
+                    const chunk = await this.request('/contents/' + this.directory.split('/').map(encodeURIComponent).join('/') + '/_chunks/' + part + '.json?ref=' + encodeURIComponent(this.branch), options);
+                    assert(chunk?.content, 'REMOTE_FORMAT', '世界分片缺失，原数据没有覆盖');
+                    data = JSON.parse(decode64(chunk.content)).data;
+                    assert(typeof data === 'string' && await hash(data) === part, 'REMOTE_FORMAT', '世界分片校验失败');
+                    this.chunks.set(part, data);
+                }
+                combined += data;
+            }
+            assert(await hash(combined) === envelope.hash, 'REMOTE_FORMAT', '完整世界校验失败');
+            raw = JSON.parse(combined);
+        }
+        const world = parseStored(raw);
         assert(world.id === id, 'REMOTE_FORMAT', '文件中的世界编号与路径不符');
-        return { world, token: result.sha };
+        const value = { world, token: result.sha };
+        this.cache.set(id, { etag: result._etag, value: copy(value) });
+        return value;
     }
     async list() {
         const root = await this.request('');
@@ -110,7 +138,7 @@ export class GitHubStore {
         if (!rows) return [];
         assert(Array.isArray(rows), 'REMOTE_FORMAT', '世界目录不是文件列表');
         const files = rows.filter((row) => row.type === 'file' && /^[\w-]+\.json$/.test(row.name));
-        assert(files.length <= 50, 'LIST_LIMIT', '框架版最多列出 50 个世界，请使用世界编号直接加入');
+        assert(files.length < 1000, 'LIST_LIMIT', '目录达到服务的列表上限，请使用邀请或世界编号加入');
         const worlds = [];
         for (const file of files) {
             const result = await this.read(file.name.slice(0, -5));
@@ -122,14 +150,59 @@ export class GitHubStore {
         assert(this.token(), 'NO_CREDENTIAL', '上传需要在本机填写 GitHub 写入凭据；凭据不会上传到世界文件');
         validateWorld(world);
         const json = JSON.stringify(world);
-        assert(new TextEncoder().encode(json).length < 900_000, 'STORAGE_SIZE', '框架版单个世界接近容量上限，请先导出；没有截断历史');
+        assert(new TextEncoder().encode(json).length < 30_000_000, 'STORAGE_SIZE', '单世界超过 30 MB，请导出并建立续篇；没有截断历史');
+        let content = json;
+        if (new TextEncoder().encode(json).length > 600_000) {
+            const parts = [];
+            for (let start = 0; start < json.length;) {
+                let end = Math.min(start + 100_000, json.length);
+                if (end < json.length && /[\uD800-\uDBFF]/.test(json[end - 1])) end--;
+                const data = json.slice(start, end), key = await hash(data); parts.push(key); start = end;
+                if (this.chunks.has(key)) continue;
+                const chunkPath = '/contents/' + this.directory.split('/').map(encodeURIComponent).join('/') + '/_chunks/' + key + '.json';
+                const existing = await this.request(chunkPath + '?ref=' + encodeURIComponent(this.branch), options);
+                if (existing) assert(await hash(JSON.parse(decode64(existing.content)).data) === key, 'REMOTE_FORMAT', '分片内容冲突');
+                else {
+                    try { await this.request(chunkPath, { ...options, method: 'PUT', body: { message: 'Shared world immutable chunk', content: utf8Base64(JSON.stringify({ data })), branch: this.branch } }); }
+                    catch (error) {
+                        const raced = await this.request(chunkPath + '?ref=' + encodeURIComponent(this.branch), options);
+                        if (!raced || await hash(JSON.parse(decode64(raced.content)).data) !== key) throw error;
+                    }
+                }
+                this.chunks.set(key, data);
+            }
+            content = JSON.stringify({ format: 'shared-world/chunks/1', id, revision: world.revision, hash: await hash(json), parts });
+        }
         const body = {
             message: 'Shared world: ' + id + ' revision ' + world.revision,
-            content: utf8Base64(json), branch: this.branch,
+            content: utf8Base64(content), branch: this.branch,
         };
         if (expected !== null) body.sha = expected;
         const result = await this.request(this.path(id), { ...options, method: 'PUT', body });
         assert(result?.content?.sha, 'REMOTE_FORMAT', 'GitHub 未返回写入版本，不能标记同步成功');
+        this.cache.delete(id);
         return { world: copy(world), token: result.content.sha };
+    }
+    async authenticate() {
+        assert(this.token(), 'NO_CREDENTIAL', '请填写你本人的 GitHub 凭据；不要使用他人的管理密钥');
+        if (this.principalToken === this.token() && this.principal) return copy(this.principal);
+        const response = await this.fetchImpl('https://api.github.com/user', { headers: { Authorization: 'Bearer ' + this.token(), Accept: 'application/vnd.github+json' }, signal: AbortSignal.timeout(15_000) });
+        assert(response.ok, 'AUTH_FAILED', 'GitHub 登录凭据无效或已过期');
+        const user = await response.json();
+        assert(user.id && user.login, 'AUTH_FAILED', '未取得有效的 GitHub 身份');
+        this.principalToken = this.token(); this.principal = { id: 'github:' + user.id, login: user.login };
+        return copy(this.principal);
+    }
+    async connectionTest({ write = false } = {}) {
+        const user = await this.authenticate(), repo = await this.request('');
+        assert(repo && repo.permissions?.push, 'NO_WRITE_PERMISSION', '当前账号没有这个数据仓库的写入权限，请由资源管理员授予协作者权限后再连接');
+        if (write) {
+            const file = '/contents/' + this.directory.split('/').map(encodeURIComponent).join('/') + '/_checks/' + Date.now() + '-' + user.login + '.json';
+            const data = { format: 'shared-world/connection-test', login: user.login, at: new Date().toISOString() };
+            const saved = await this.request(file, { method: 'PUT', body: { message: 'Shared world connection check', content: utf8Base64(JSON.stringify(data)), branch: this.branch } });
+            const readback = await this.request(file + '?ref=' + encodeURIComponent(this.branch));
+            assert(saved?.content?.sha && readback?.sha === saved.content.sha, 'READBACK', '测试写入未读回，不能标记连接成功');
+        }
+        return { ...user, private: repo.private, writeVerified: write };
     }
 }

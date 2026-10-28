@@ -129,6 +129,14 @@
     #sw-panel .sw-timeline li { grid-template-columns: 1fr; gap: 5px; padding: 19px 0; }
     #sw-panel .sw-footer { padding: 11px 20px; font-size: 9px; flex-wrap: wrap; }
 }
+#sw-panel .sw-onboarding { display: grid; grid-template-columns: repeat(4,minmax(0,1fr)); gap: 7px; margin: 0 0 24px; }
+#sw-panel .sw-onboarding span { border-bottom: 2px solid var(--sw-line); padding: 10px 3px; font-size: 11px; color: var(--sw-muted); }
+#sw-panel .sw-onboarding .is-done { color: var(--sw-accent); border-color: var(--sw-accent); }
+#sw-panel .sw-actor-card details { margin: 12px 0; }
+#sw-panel .sw-actor-card details p { white-space: pre-wrap; overflow-wrap: anywhere; }
+#sw-panel input[type="file"] { max-width: 100%; font-size: 12px; }
+#sw-panel button:disabled { opacity: .5; cursor: wait; }
+@media (max-width: 540px) { #sw-panel .sw-onboarding { grid-template-columns: repeat(2,minmax(0,1fr)); } }
 @media (prefers-reduced-motion: reduce) {
     #sw-panel * { transition: none !important; scroll-behavior: auto !important; }
 }

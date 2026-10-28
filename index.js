@@ -2,6 +2,7 @@ import { WorldController } from './src/controller.js';
 import { WorldPanel } from './src/panel.js';
 import { attachTavern } from './src/tavern.js';
 import { mountWandMenu } from './src/menu.js';
+import { resolveWorldbooks } from './src/compatibility.js';
 
 let integration;
 let ready;
@@ -13,7 +14,7 @@ async function initialize() {
     if (globalThis.sharedWorld?.version) return;
     const getContext = () => globalThis.SillyTavern?.getContext?.();
     if (!getContext()) return;
-    const controller = new WorldController({ getContext });
+    const controller = new WorldController({ getContext, resolveCompatibility: resolveWorldbooks });
     const panel = new WorldPanel(controller);
     integration = attachTavern(controller, getContext);
     mountWandMenu(document, () => panel.open());
@@ -24,10 +25,10 @@ async function initialize() {
     if (target) {
         const block = document.createElement('div'); block.id = 'sw-settings-entry';
         const title = document.createElement('strong'); title.textContent = '共叙 · 联机世界书';
-        const note = document.createElement('p'); note.textContent = '框架版 · 默认不开启联机';
+        const note = document.createElement('p'); note.textContent = '共同历史 · 在所选聊天中开启联机';
         block.append(title, note, button); target.append(block);
     } else { button.className = 'sw-floating-launcher'; document.body.append(button); }
-    globalThis.sharedWorld = { version: '0.1.1', open: () => panel.open() };
+    globalThis.sharedWorld = { version: '1.0.0-rc.1', open: () => panel.open() };
     await controller.refreshContext();
     const invite = new URL(location.href).searchParams.get('sworld');
     if (invite) {

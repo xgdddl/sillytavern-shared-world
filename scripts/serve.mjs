@@ -11,6 +11,7 @@ const server = http.createServer(async (request, response) => {
     try {
         const url = new URL(request.url, 'http://127.0.0.1');
         const relative = decodeURIComponent(url.pathname === '/' ? '/demo/index.html' : url.pathname);
+        if (!/^\/(?:demo\/[^/]+\.(?:html|js)|src\/[^/]+\.js|style\.css|manifest\.json)$/.test(relative)) { response.writeHead(403).end('Forbidden'); return; }
         const target = path.resolve(root, '.' + relative);
         if (!target.startsWith(root + path.sep)) { response.writeHead(403).end('Forbidden'); return; }
         const body = await readFile(target);
