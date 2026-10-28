@@ -9,7 +9,7 @@ import { createInvite, parseInvite, SecretVault, identityBackup, readIdentity } 
 const DEFAULTS = {
     provider: 'local', github: { owner: '', repo: '', branch: 'main', directory: 'shared-world/worlds' },
     models: { extraction: { endpoint: '', model: '' }, summary: { endpoint: '', model: '' }, reasoning: { endpoint: '', model: '' } },
-    bindings: {}, pending: [], archivedDrafts: [], snapshots: {}, memories: {}, autoSummary: true,
+    bindings: {}, pending: [], archivedDrafts: [], snapshots: {}, memories: {}, worldProgress: {}, actorProgress: {}, autoSummary: true,
 };
 export class WorldController extends EventTarget {
     constructor({ getContext = () => null, storage = globalThis.localStorage, namespace = 'shared-world.preferences.v1', storeFactory, demoCard, resolveCompatibility = async () => null } = {}) {
@@ -29,7 +29,7 @@ export class WorldController extends EventTarget {
         this.settings = { ...copy(DEFAULTS), ...saved };
         assert(['local', 'github'].includes(this.settings.provider), 'SETTINGS_CORRUPT', '存储来源配置无效，没有静默改成本机存储');
         for (const field of ['pending', 'archivedDrafts']) assert(Array.isArray(this.settings[field]), 'SETTINGS_CORRUPT', field + '不是有效列表，原数据保留');
-        for (const field of ['bindings', 'snapshots', 'models', 'github']) assert(this.settings[field] && typeof this.settings[field] === 'object' && !Array.isArray(this.settings[field]), 'SETTINGS_CORRUPT', field + '不是有效对象，原数据保留');
+        for (const field of ['bindings', 'snapshots', 'models', 'github', 'memories', 'worldProgress', 'actorProgress']) assert(this.settings[field] && typeof this.settings[field] === 'object' && !Array.isArray(this.settings[field]), 'SETTINGS_CORRUPT', field + '不是有效对象，原数据保留');
         this.settings.playerId ||= uid();
         this.settings.bindings ||= {}; this.settings.pending ||= []; this.settings.archivedDrafts ||= []; this.settings.snapshots ||= {};
         this.state = { worlds: [], world: null, cardKey: '', cardName: '', bindingKey: '', notice: '', error: '', busy: false, lastSync: null, summary: '' };
@@ -57,6 +57,8 @@ export class WorldController extends EventTarget {
     bind(patch) {
         assert(this.state.bindingKey, 'NO_CHAT', '请先打开一个角色聊天');
         this.settings.bindings[this.bindingStoreKey] = { ...this.binding, ...copy(patch) };
+        if (this.binding.worldId) this.settings.worldProgress[this.bindingStoreKey + ':' + this.binding.worldId] = copy(this.binding);
+        if (this.binding.worldId && this.binding.actorId) this.settings.actorProgress[this.sourceKey() + ':' + this.binding.worldId + ':' + this.binding.actorId] = { day: this.binding.day, clock: this.binding.clock };
         this.save(); this.changed();
     }
     async refreshContext() {
@@ -104,7 +106,9 @@ export class WorldController extends EventTarget {
         if (world.id === this.binding.worldId && this.state.world?.id === world.id) {
             this.state.world = world; this.state.notice = '已读取当前世界的最新记录。'; this.changed(); return;
         }
-        this.state.world = world; this.bind({ worldId: world.id, actorId: '', day: 0, clock: '08:00', participants: [], enabled: false });
+        if (this.binding.enabled) await this.releaseControl();
+        const saved = this.settings.worldProgress[this.bindingStoreKey + ':' + world.id];
+        this.state.world = world; this.bind(saved ? { ...saved, enabled: false } : { worldId: world.id, actorId: '', day: 0, clock: '08:00', participants: [], enabled: false });
         this.state.notice = '已读取世界。请选择归属自己的人物，或创建新人物。';
     }
     async sync() {
@@ -149,7 +153,12 @@ export class WorldController extends EventTarget {
     }
     selectActor(actorId) {
         assert(this.state.world?.actors.some((row) => row.id === actorId && row.ownerId === this.settings.playerId), 'OWNERSHIP', '只能操作归属自己的人物');
-        this.bind({ actorId, participants: [] });
+        const saved = this.settings.actorProgress[this.sourceKey() + ':' + this.binding.worldId + ':' + actorId];
+        const actor = this.state.world.actors.find((row) => row.id === actorId);
+        const latest = this.state.world.events.filter((row) => row.actorId === actorId).sort((a, b) => b.time.tick - a.time.tick)[0]?.time;
+        const day = Math.floor(actor.createdTick / 1440), minutes = actor.createdTick % 1440;
+        const at = saved ?? latest ?? { day, clock: String(Math.floor(minutes / 60)).padStart(2, '0') + ':' + String(minutes % 60).padStart(2, '0') };
+        this.bind({ actorId, day: at.day, clock: at.clock, participants: [] });
     }
     async savePolicy(delegation) {
         this.state.world = await this.service.transact(this.binding.worldId, { type: 'actor.policy', actorId: this.binding.actorId, delegation });

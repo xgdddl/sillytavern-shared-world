@@ -1,6 +1,6 @@
 {
   "name": "sillytavern-shared-world",
-  "version": "1.0.0-rc.1",
+  "version": "1.0.0-rc.2",
   "private": true,
   "type": "module",
   "description": "无房主的 SillyTavern 共享故事与联机世界书扩展",

@@ -144,3 +144,10 @@ test('复用酒馆模型超时能停止后台生成，取消函数失败也能�
     const router = new ModelRouter({ timeoutMs: 10, getSettings: () => ({ models: {} }), getSecret: () => '', getContext: () => ({ generateRaw: () => new Promise(() => {}), stopGeneration: () => { throw new Error('cancel failed'); } }) });
     await assert.rejects(router.generate('extraction', 'test'), /超过等待期限/); assert.equal(router.depth, 0);
 });
+test('切换世界与人物再返回会恢复各自故事进度，不把所有人重置到第0天', async () => {
+    const store = new MemoryStore(), c = new WorldController({ storage: storage(), demoCard: { data: { name: '多世界' } }, storeFactory: () => store });
+    await c.refreshContext(); await c.createWorld({ name: '世界甲' }); await c.createActor({ name: '旅人甲' });
+    c.setTime(3, '12:30'); const worldA = c.binding.worldId, actorA = c.binding.actorId;
+    await c.createWorld({ name: '世界乙' }); await c.createActor({ name: '旅人乙' }); c.setTime(9, '18:10');
+    await c.joinWorld(worldA); assert.equal(c.binding.actorId, actorA); assert.equal(c.binding.day, 3); assert.equal(c.binding.clock, '12:30');
+});
